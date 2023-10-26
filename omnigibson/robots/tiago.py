@@ -628,3 +628,12 @@ class Tiago(ManipulationRobot, LocomotionRobot, ActiveCameraRobot):
     def get_angular_velocity(self) -> np.ndarray:
         # Note that the link we are interested in is self.base_footprint_link, not self.root_link
         return self.base_footprint_link.get_angular_velocity()
+    
+    def gen_action_from_vr_data(self, vr_data: dict):
+        action = np.zeros(19)
+        x_offset = vr_data["button_data"][1]["axis"]["touchpad_y"]
+        y_offset = -vr_data["button_data"][1]["axis"]["touchpad_x"]
+        theta_offset = -vr_data["button_data"][0]["axis"]["touchpad_x"]
+        action[:3] = np.array([x_offset, y_offset, theta_offset]) * 0.3
+        action[5:] = ManipulationRobot.gen_action_from_vr_data(self, vr_data)
+        return action

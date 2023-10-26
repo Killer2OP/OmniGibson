@@ -3,6 +3,7 @@ import numpy as np
 
 from omnigibson.macros import gm
 from omnigibson.robots.manipulation_robot import ManipulationRobot
+from omnigibson.utils.transform_utils import euler2quat
 
 
 class FrankaPanda(ManipulationRobot):
@@ -129,18 +130,6 @@ class FrankaPanda(ManipulationRobot):
         # Fetch does not support discrete actions
         raise ValueError("Franka does not support discrete actions!")
 
-    def tuck(self):
-        """
-        Immediately set this robot's configuration to be in tucked mode
-        """
-        self.set_joint_positions(self.tucked_default_joint_pos)
-
-    def untuck(self):
-        """
-        Immediately set this robot's configuration to be in untucked mode
-        """
-        self.set_joint_positions(self.untucked_default_joint_pos)
-
     def update_controller_mode(self):
         super().update_controller_mode()
         # overwrite joint params (e.g. damping, stiffess, max_effort) here
@@ -203,4 +192,8 @@ class FrankaPanda(ManipulationRobot):
     @property
     def urdf_path(self):
         return os.path.join(gm.ASSET_PATH, "models/franka/franka_panda.urdf")
+    
+    @property
+    def vr_rotation_offset(self):
+        return {self.default_arm: euler2quat([-np.pi, 0, 0])}
     

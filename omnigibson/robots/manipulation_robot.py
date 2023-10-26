@@ -20,6 +20,8 @@ from omnigibson.utils.constants import JointType, PrimType
 from omnigibson.utils.usd_utils import create_joint
 from omnigibson.utils.ui_utils import suppress_omni_log
 
+import carb
+from omni.physx import get_physx_scene_query_interface
 from pxr import Gf
 
 
@@ -728,7 +730,8 @@ class ManipulationRobot(BaseRobot):
             candidates_set, robot_contact_links = self._find_gripper_contacts(arm=arm)
             # If we're using assisted grasping, we further filter candidates via ray-casting
             if self.grasping_mode == "assisted":
-                raise NotImplementedError("Assisted grasp not yet available in OmniGibson!")
+                candidates_set_raycast = self._find_gripper_raycast_collisions(arm=arm)
+                candidates_set = candidates_set.intersection(candidates_set_raycast)
         else:
             raise ValueError("Invalid grasping mode for calculating in hand object: {}".format(self.grasping_mode))
 
@@ -767,9 +770,74 @@ class ManipulationRobot(BaseRobot):
         # Return None if object cannot be assisted grasped or not touching at least two fingers
         if ag_obj is None or (not can_assisted_grasp(ag_obj)) or (not touching_at_least_two_fingers):
             return None
-
+        
+        ag_obj_link = ag_obj.links[ag_obj_link_name]
         # Get object and its contacted link
         return ag_obj, ag_obj.links[ag_obj_link_name]
+
+    # TODO: refine this
+    def _find_gripper_raycast_collisions(self, arm="default"):
+        """
+        For arm @arm, calculate any prims that are not part of the robot
+        itself that intersect with rays cast between any of the gripper's start and end points
+
+        :param arm: str, specific arm whose gripper will be checked for raycast collisions. Default is "default"
+            which corresponds to the first entry in self.arm_names
+
+        :return set[str]: set of prim path of detected raycast intersections that
+            are not the robot itself. Note: if no objects that are not the robot itself are intersecting,
+            the set will be empty.
+        """
+        arm = self.default_arm if arm == "default" else arm
+        # First, make sure start and end grasp points exist (i.e.: aren't None)
+        assert (
+            self.assisted_grasp_start_points[arm] is not None
+        ), "In order to use assisted grasping, assisted_grasp_start_points must not be None!"
+        assert (
+            self.assisted_grasp_end_points[arm] is not None
+        ), "In order to use assisted grasping, assisted_grasp_end_points must not be None!"
+
+        # Iterate over all start and end grasp points and calculate their x,y,z positions in the world frame
+        # (per arm appendage)
+        # Since we'll be calculating the cartesian cross product between start and end points, we stack the start points
+        # by the number of end points and repeat the individual elements of the end points by the number of start points
+        startpoints = []
+        endpoints = []
+        for grasp_start_point in self.assisted_grasp_start_points[arm]:
+            # Get world coordinates of link base frame
+            link_pos, link_orn = self.links[grasp_start_point.link_name].get_position_orientation()
+            # Calculate grasp start point in world frame and add to startpoints
+            start_point, _ = T.pose_transform(link_pos, link_orn, grasp_start_point.position, [0, 0, 0, 1])
+            startpoints.append(start_point)
+        # Repeat for end points
+        for grasp_end_point in self.assisted_grasp_end_points[arm]:
+            # Get world coordinates of link base frame
+            link_pos, link_orn = self.links[grasp_end_point.link_name].get_position_orientation()
+            # Calculate grasp start point in world frame and add to endpoints
+            end_point, _ = T.pose_transform(link_pos, link_orn, grasp_end_point.position, [0, 0, 0, 1])
+            endpoints.append(end_point)
+        # Stack the start points and repeat the end points, and add these values to the raycast dicts
+        n_startpoints, n_endpoints = len(startpoints), len(endpoints)
+        raycast_startpoints = startpoints * n_endpoints
+        raycast_endpoints = []
+        for endpoint in endpoints:
+            raycast_endpoints += [endpoint] * n_startpoints
+
+        # Calculate raycasts from each start point to end point -- this is n_startpoints * n_endpoints total rays
+        ray_data = set()
+        # Repeat twice, so that we avoid collisions with the fingers of each gripper themself
+        for raycast_startpoint, raycast_endpoint in zip(raycast_startpoints, raycast_endpoints):
+            origin = carb.Float3(raycast_startpoint)
+            dir = carb.Float3(raycast_endpoint - raycast_startpoint)
+            distance = np.linalg.norm(dir)
+            hit = get_physx_scene_query_interface().raycast_closest(origin, dir, distance)
+            if hit["hit"]:
+                # filter out self body parts
+                # TODO (Wensi): Currently ignores collisions between body parts
+                if self.prim_path not in hit["rigidBody"]:
+                    ray_data.add(hit["rigidBody"])
+        return ray_data
+
 
     def _handle_release_window(self, arm="default"):
         """
@@ -1300,3 +1368,31 @@ class ManipulationRobot(BaseRobot):
         classes = super()._do_not_register_classes
         classes.add("ManipulationRobot")
         return classes
+    
+    @property
+    def vr_rotation_offset(self):
+        """
+        Rotational offset that will be applied for VR teleoperation
+        """
+        return {arm: np.array([0, 0, 0, 1]) for arm in self.arm_names}
+
+    def gen_action_from_vr_data(self, vr_data: dict) -> np.ndarray:
+        """
+        Generate action data from VR input for robot teleoperation
+        NOTE: This implementation only supports InverseKinematicsController for arm and MultiFingerGripperController for gripper. 
+        Overwrite this function if the robot is using a different controller.
+        Args:
+            vr_data (dict): dictionary containing vr_data from VRSys.step()
+        Returns:
+            np.ndarray: array of action data for arm and gripper
+        """
+        action = np.zeros(self.n_arms * 7)
+        for i in range(self.n_arms):
+            arm_name = self.arm_names[self.n_arms - i - 1]
+            cur_robot_eef_pos = self.links[self.eef_link_names[arm_name]].get_position()
+            target_pos, target_orn = T.mat2pose(vr_data["transforms"]["controllers"][1 - i])
+            target_orn = T.quat_multiply(target_orn, self.vr_rotation_offset[arm_name])
+            trigger_fraction = vr_data["button_data"][1 - i]["axis"]["trigger"]
+            action[i*7 : i*7+6] = np.r_[target_pos - cur_robot_eef_pos, T.quat2axisangle(target_orn)]
+            action[i*7+6] = trigger_fraction
+        return action

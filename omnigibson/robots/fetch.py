@@ -7,6 +7,7 @@ from omnigibson.robots.active_camera_robot import ActiveCameraRobot
 from omnigibson.robots.manipulation_robot import GraspingPoint, ManipulationRobot
 from omnigibson.robots.two_wheel_robot import TwoWheelRobot
 from omnigibson.utils.python_utils import assert_valid_key
+from omnigibson.utils.transform_utils import euler2quat
 from omnigibson.utils.usd_utils import JointType
 
 DEFAULT_ARM_POSES = {
@@ -437,3 +438,13 @@ class Fetch(ManipulationRobot, TwoWheelRobot, ActiveCameraRobot):
     @property
     def urdf_path(self):
         return os.path.join(gm.ASSET_PATH, "models/fetch/fetch.urdf")
+
+    @property
+    def vr_rotation_offset(self):
+        return {self.default_arm: euler2quat([0, np.pi / 2, 0])}
+    
+    def gen_action_from_vr_data(self, vr_data: dict):
+        action = np.zeros(11)
+        action[:2] = TwoWheelRobot.gen_action_from_vr_data(self, vr_data)
+        action[4:] = ManipulationRobot.gen_action_from_vr_data(self, vr_data)
+        return action
